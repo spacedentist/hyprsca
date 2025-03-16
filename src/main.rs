@@ -3,7 +3,7 @@ use hyprrust::HyprlandConnection;
 use hyprrust::commands::Command;
 use hyprrust::data::{HyprlandData, HyprlandDataWithArgument, Monitor, Version};
 use hyprrust_macros::{HyprlandData, HyprlandDataWithArgument};
-use log::{Level, debug, log_enabled};
+use log::{Level, debug, error, log_enabled};
 use serde::{Deserialize, Serialize};
 
 #[derive(Parser, Debug)]
@@ -23,10 +23,17 @@ enum Commands {
     Save,
 
     /// Restore previously save screen configuration
-    Restore,
+    Restore(RestoreOptions),
 
     /// Display information on connected monitors
     Info,
+}
+
+#[derive(Parser, Debug)]
+struct RestoreOptions {
+    /// If no saved configuration is found, apply a default configuration as default
+    #[clap(long)]
+    fallback_to_default: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, HyprlandData, HyprlandDataWithArgument)]
@@ -122,6 +129,15 @@ impl Command for Head {
     }
 }
 
+#[derive(Debug, Clone)]
+struct HyprlandCommand(pub String);
+
+impl Command for HyprlandCommand {
+    fn get_command(&self) -> String {
+        self.0.clone()
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     env_logger::init();
 
@@ -138,46 +154,40 @@ fn main() -> anyhow::Result<()> {
     let mut heads: Vec<Head> = monitors.iter().map(Head::from).collect();
     heads.sort_by(Head::cmp_mms);
 
-    // Calculate our hash from the set of connected screens
-    let hash = hash_heads(&heads);
-
-    let base_directories = xdg::BaseDirectories::with_prefix("hyprsca")?;
-
     match cli.command {
         Commands::Save => {
-            let path = base_directories.place_state_file(format!("{}.json", hex::encode(hash)))?;
+            let base_directories = xdg::BaseDirectories::with_prefix("hyprsca")?;
+            let path = base_directories
+                .place_state_file(format!("{}.json", hex::encode(hash_heads(&heads))))?;
             heads.iter_mut().for_each(|h| {
                 h.name = None;
             });
             std::fs::write(path, serde_json::to_string_pretty(&heads)?)?;
         }
-        Commands::Restore => {
-            let path = base_directories.get_state_file(format!("{}.json", hex::encode(hash)));
-            let mut saved_heads: Vec<Head> = serde_json::from_slice(&std::fs::read(path)?)?;
-            if saved_heads.len() != heads.len() {
-                return Err(anyhow::anyhow!("Heads lengths mismatch"));
-            }
-            saved_heads.sort_by(Head::cmp_mms);
+        Commands::Restore(ref opt) => {
+            if let Err(err) = restore_config(&heads, &conn) {
+                error!("{}", err);
 
-            for (saved_head, head) in saved_heads.iter_mut().zip(heads.iter()) {
-                if (&saved_head.make, &saved_head.model, &saved_head.serial)
-                    != (&head.make, &head.model, &head.serial)
-                {
-                    return Err(anyhow::anyhow!("Mismatch"));
+                if opt.fallback_to_default {
+                    let commands: Vec<Box<dyn Command>> = heads
+                        .iter()
+                        .filter_map(|h| {
+                            h.name.as_ref().map(|name| -> Box<dyn Command> {
+                                Box::new(HyprlandCommand(format!(
+                                    "keyword monitor {},preferred,auto,auto",
+                                    name
+                                )))
+                            })
+                        })
+                        .collect();
+
+                    conn.send_recipe_sync(&commands)
+                        .map_err(|mut verr| verr.pop().unwrap())?;
                 }
-                saved_head.name = head.name.clone();
             }
-
-            println!("Saved heads: {:?}", saved_heads);
-            let heads: Vec<Box<dyn Command>> = saved_heads
-                .into_iter()
-                .map(|m| -> Box<dyn Command> { Box::new(m) })
-                .collect();
-
-            conn.send_recipe_sync(&heads)
-                .map_err(|mut verr| verr.pop().unwrap())?;
         }
         Commands::Info => {
+            let base_directories = xdg::BaseDirectories::with_prefix("hyprsca")?;
             println!("{} connected heads:", heads.len());
             for head in heads.iter() {
                 println!(
@@ -188,7 +198,9 @@ fn main() -> anyhow::Result<()> {
                     &head.serial
                 );
             }
-            let path = base_directories.get_state_file(format!("{}.json", hex::encode(hash)));
+            let path = base_directories
+                .get_state_file(format!("{}.json", hex::encode(hash_heads(&heads))));
+
             println!("Configuration path: {}", path.display());
         }
     }
@@ -212,4 +224,34 @@ fn hash_heads(heads: &[Head]) -> [u8; 32] {
     }
 
     hasher.finalize().into()
+}
+
+fn restore_config(heads: &[Head], conn: &HyprlandConnection) -> anyhow::Result<()> {
+    let base_directories = xdg::BaseDirectories::with_prefix("hyprsca")?;
+    let path = base_directories.get_state_file(format!("{}.json", hex::encode(hash_heads(heads))));
+    let mut saved_heads = serde_json::from_slice::<Vec<Head>>(&std::fs::read(path)?)?;
+    if saved_heads.len() != heads.len() {
+        return Err(anyhow::anyhow!("Heads lengths mismatch"));
+    }
+    saved_heads.sort_by(Head::cmp_mms);
+
+    for (saved_head, head) in saved_heads.iter_mut().zip(heads.iter()) {
+        if (&saved_head.make, &saved_head.model, &saved_head.serial)
+            != (&head.make, &head.model, &head.serial)
+        {
+            return Err(anyhow::anyhow!("Mismatch"));
+        }
+        saved_head.name = head.name.clone();
+    }
+
+    println!("Saved heads: {:?}", saved_heads);
+    let commands: Vec<Box<dyn Command>> = saved_heads
+        .into_iter()
+        .map(|m| -> Box<dyn Command> { Box::new(m) })
+        .collect();
+
+    conn.send_recipe_sync(&commands)
+        .map_err(|mut verr| verr.pop().unwrap())?;
+
+    Ok(())
 }
