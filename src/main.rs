@@ -21,6 +21,7 @@ pub struct Cli {
 enum Commands {
     Restore,
     Save,
+    Info,
 }
 
 #[derive(Serialize, Deserialize, Debug, HyprlandData, HyprlandDataWithArgument)]
@@ -170,6 +171,20 @@ fn main() -> anyhow::Result<()> {
 
             conn.send_recipe_sync(&heads)
                 .map_err(|mut verr| verr.pop().unwrap())?;
+        }
+        Commands::Info => {
+            println!("{} connected heads:", heads.len());
+            for head in heads.iter() {
+                println!(
+                    "* {}\n  Make: {}\n  Model: {}\n  Serial: {}",
+                    head.name.as_deref().unwrap_or(""),
+                    &head.make,
+                    &head.model,
+                    &head.serial
+                );
+            }
+            let path = base_directories.get_state_file(format!("{}.json", hex::encode(hash)));
+            println!("Configuration path: {}", path.display());
         }
     }
 
