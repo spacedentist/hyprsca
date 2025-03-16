@@ -19,8 +19,13 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    Restore,
+    /// Save configuration screen configuration
     Save,
+
+    /// Restore previously save screen configuration
+    Restore,
+
+    /// Display information on connected monitors
     Info,
 }
 
