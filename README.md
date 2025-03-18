@@ -4,6 +4,8 @@ A screen configuration assistant for Hyprland
 ## Features
  - can save current screen configuration and easily restore it later
  - does not require to run as daemon in the background
+ - can be configured to ignore a head (the built-in laptop screen) when an ACPI
+ lid is closed
 
 ## Objective
 There are already a number of programs available that can automatically restore
@@ -25,8 +27,25 @@ bindl = SUPER, O, exec, hyprsca restore
 ```
 `bindl` is used, so that this shortcut works even on the lock screen.
 
-## Planned Features
-The first version of hyprsca is extremely simple and implemented in under 200
-lines of Rust. The next feature I want to implement is a way to ignore the
-builtin laptop screen depending on the state of the laptop lid. This way, you
-can have separate configurations for opened and closed laptop lid.
+## Configuration
+hyprsca can be configured using a TOML file called `hyprsca.toml` in an XDG
+config file location (e.g. `~/.config/hyprsca.toml`).
+
+### Lid
+To configure which head should be ignored when the laptop lid is closed, add a
+`[[lid]]` section to the config file with `file` and `head` entries. `file`
+must point to the ACPI state file (e.g. `/proc/acpi/button/lid/LID/state` - it
+may be slightly different on your system, e.g. it might say `LID0` instead of
+`LID`). `head` is the name of the hyprctl output that should be ignored when
+the lid is closed. Example:
+```
+[[lid]]
+file = "/proc/acpi/button/lid/LID/state"
+head = "eDP-1"
+```
+You can define multiple such `[[lid]]` sections. While I can't imagine there
+are devices with multiple ACPI lids, it might still be useful to have multiple
+sections if you use your config on multiple machines. For each `[[lid]]`
+section, if the defined ACPI state file says the lid is closed (the contents of
+the file end with the letters `closed` after stripping white space), then the
+given head is added to the set of ignored heads.

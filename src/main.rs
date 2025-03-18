@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 use hyprrust::HyprlandConnection;
 use hyprrust::commands::Command;
@@ -34,6 +36,17 @@ struct RestoreOptions {
     /// If no saved configuration is found, apply a default configuration as default
     #[clap(long)]
     fallback_to_default: bool,
+}
+
+#[derive(Deserialize, Debug, Default)]
+struct ConfigFile {
+    lid: Vec<LidConfig>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+struct LidConfig {
+    file: PathBuf,
+    head: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, HyprlandData, HyprlandDataWithArgument)]
@@ -142,6 +155,8 @@ fn main() -> anyhow::Result<()> {
     env_logger::init();
 
     let cli = Cli::parse();
+    let config = read_config_file()?;
+    debug!("Config: {:?}", &config);
 
     let conn = HyprlandConnection::new();
     if log_enabled!(Level::Debug) {
@@ -149,9 +164,38 @@ fn main() -> anyhow::Result<()> {
         debug!("Hyprland version: {version}");
     }
 
+    // Find out which heads should be ignored because of a closed lid
+    let ignored_head_names: std::collections::HashSet<String> = config
+        .lid
+        .iter()
+        .filter_map(|LidConfig { file, head }| {
+            let closed = std::fs::read(file)
+                .ok()
+                .map(|contents| contents.trim_ascii().ends_with(b"closed"))
+                .unwrap_or(false);
+            if closed { Some(head.to_string()) } else { None }
+        })
+        .collect();
+
     // Get all monitors from Hyprland, convert to Head structure and sort
     let monitors = conn.get_with_argument_sync::<Monitors>("all".to_string())?;
-    let mut heads: Vec<Head> = monitors.iter().map(Head::from).collect();
+    let mut ignored_heads = Vec::new();
+    let mut heads: Vec<Head> = monitors
+        .iter()
+        .map(Head::from)
+        .filter_map(|h| {
+            if h.name
+                .as_ref()
+                .map(|name| ignored_head_names.contains(name))
+                .unwrap_or(false)
+            {
+                ignored_heads.push(h);
+                None
+            } else {
+                Some(h)
+            }
+        })
+        .collect();
     heads.sort_by(Head::cmp_mms);
 
     match cli.command {
@@ -166,7 +210,7 @@ fn main() -> anyhow::Result<()> {
             std::fs::write(path, serde_json::to_string_pretty(&heads)?)?;
         }
         Commands::Restore(ref opt) => {
-            if let Err(err) = restore_config(&heads, &conn) {
+            if let Err(err) = restore_config(&heads, &ignored_heads, &conn) {
                 error!("{}", err);
 
                 if opt.fallback_to_default {
@@ -189,10 +233,19 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Info => {
             let base_directories = xdg::BaseDirectories::with_prefix("hyprsca")?;
-            println!("{} connected heads:", heads.len());
+            println!("{} connected heads:", heads.len() + ignored_heads.len());
             for head in heads.iter() {
                 println!(
                     "* {}\n  Make: {}\n  Model: {}\n  Serial: {}",
+                    head.name.as_deref().unwrap_or(""),
+                    &head.make,
+                    &head.model,
+                    &head.serial
+                );
+            }
+            for head in ignored_heads.iter() {
+                println!(
+                    "* {} [ignored]\n  Make: {}\n  Model: {}\n  Serial: {}",
                     head.name.as_deref().unwrap_or(""),
                     &head.make,
                     &head.model,
@@ -227,7 +280,11 @@ fn hash_heads(heads: &[Head]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-fn restore_config(heads: &[Head], conn: &HyprlandConnection) -> anyhow::Result<()> {
+fn restore_config(
+    heads: &[Head],
+    ignored_heads: &[Head],
+    conn: &HyprlandConnection,
+) -> anyhow::Result<()> {
     let base_directories = xdg::BaseDirectories::with_prefix("hyprsca")?;
     let path = base_directories.get_state_file(format!("{}.json", hex::encode(hash_heads(heads))));
     debug!("Attempting to load screen config from {}", path.display());
@@ -258,11 +315,37 @@ fn restore_config(heads: &[Head], conn: &HyprlandConnection) -> anyhow::Result<(
     debug!("Restoring config: {:?}", saved_heads);
     let commands: Vec<Box<dyn Command>> = saved_heads
         .into_iter()
+        .chain(ignored_heads.iter().map(|h| {
+            let mut h = h.clone();
+            h.config = None;
+            h
+        }))
         .map(|m| -> Box<dyn Command> { Box::new(m) })
         .collect();
+
+    if log_enabled!(Level::Debug) {
+        for cmd in commands.iter() {
+            debug!("hyprctl {}", cmd.get_command());
+        }
+    }
 
     conn.send_recipe_sync(&commands)
         .map_err(|mut verr| verr.pop().unwrap())?;
 
     Ok(())
+}
+
+fn read_config_file() -> anyhow::Result<ConfigFile> {
+    let base_directories = xdg::BaseDirectories::new()?;
+    let path = base_directories.get_config_file("hyprsca.toml");
+
+    let contents = std::fs::read(path);
+
+    if let Err(ref err) = contents {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            return Ok(Default::default());
+        }
+    }
+
+    Ok(toml::from_str(std::str::from_utf8(&contents?)?)?)
 }
