@@ -159,6 +159,7 @@ fn main() -> anyhow::Result<()> {
             let base_directories = xdg::BaseDirectories::with_prefix("hyprsca")?;
             let path = base_directories
                 .place_state_file(format!("{}.json", hex::encode(hash_heads(&heads))))?;
+            debug!("Saving screen config to {}", path.display());
             heads.iter_mut().for_each(|h| {
                 h.name = None;
             });
@@ -229,22 +230,32 @@ fn hash_heads(heads: &[Head]) -> [u8; 32] {
 fn restore_config(heads: &[Head], conn: &HyprlandConnection) -> anyhow::Result<()> {
     let base_directories = xdg::BaseDirectories::with_prefix("hyprsca")?;
     let path = base_directories.get_state_file(format!("{}.json", hex::encode(hash_heads(heads))));
-    let mut saved_heads = serde_json::from_slice::<Vec<Head>>(&std::fs::read(path)?)?;
+    debug!("Attempting to load screen config from {}", path.display());
+    let mut saved_heads = serde_json::from_slice::<Vec<Head>>(&std::fs::read(&path)?)?;
     if saved_heads.len() != heads.len() {
-        return Err(anyhow::anyhow!("Heads lengths mismatch"));
+        return Err(anyhow::anyhow!(
+            "Screen config {} does not match connected heads ({}!={})",
+            path.display(),
+            saved_heads.len(),
+            heads.len()
+        ));
     }
     saved_heads.sort_by(Head::cmp_mms);
 
-    for (saved_head, head) in saved_heads.iter_mut().zip(heads.iter()) {
+    for (idx, (saved_head, head)) in saved_heads.iter_mut().zip(heads.iter()).enumerate() {
         if (&saved_head.make, &saved_head.model, &saved_head.serial)
             != (&head.make, &head.model, &head.serial)
         {
-            return Err(anyhow::anyhow!("Mismatch"));
+            return Err(anyhow::anyhow!(
+                "Screen config {} does not match connected heads (idx {})",
+                path.display(),
+                idx,
+            ));
         }
         saved_head.name = head.name.clone();
     }
 
-    println!("Saved heads: {:?}", saved_heads);
+    debug!("Restoring config: {:?}", saved_heads);
     let commands: Vec<Box<dyn Command>> = saved_heads
         .into_iter()
         .map(|m| -> Box<dyn Command> { Box::new(m) })
