@@ -1,12 +1,13 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use hyprrust::HyprlandConnection;
-use hyprrust::commands::Command;
-use hyprrust::data::{HyprlandData, HyprlandDataWithArgument, Monitor, Version};
-use hyprrust_macros::{HyprlandData, HyprlandDataWithArgument};
-use log::{Level, debug, error, log_enabled};
-use serde::{Deserialize, Serialize};
+use log::{debug, error};
+use serde::Deserialize;
+
+use hyprsca::{
+    backend::{Backend, HyprctlBackend, WlrRandrBackend},
+    types::Head,
+};
 
 #[derive(Parser, Debug)]
 #[clap(
@@ -15,8 +16,21 @@ use serde::{Deserialize, Serialize};
     about = "Save and restore monitor configurations in Hyprland"
 )]
 pub struct Cli {
+    #[clap(long)]
+    #[arg(value_enum)]
+    backend: Option<BackendType>,
+
+    #[clap(long)]
+    executable: Option<String>,
+
     #[clap(subcommand)]
     command: Commands,
+}
+
+#[derive(Debug, Clone, clap::ValueEnum)]
+enum BackendType {
+    WlrRandr,
+    Hyprctl,
 }
 
 #[derive(Subcommand, Debug)]
@@ -49,120 +63,29 @@ struct LidConfig {
     head: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, HyprlandData, HyprlandDataWithArgument)]
-pub struct Monitors(Vec<Monitor>);
-impl std::ops::Deref for Monitors {
-    type Target = Vec<Monitor>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct Head {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(default)]
-    name: Option<String>,
-    make: String,
-    model: String,
-    serial: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(default)]
-    config: Option<HeadConfig>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct HeadConfig {
-    width: i32,
-    height: i32,
-    refresh_rate: f64,
-    x: i32,
-    y: i32,
-    scale: f64,
-    transform: i32,
-    vrr: bool,
-}
-
-impl From<&Monitor> for Head {
-    fn from(mon: &Monitor) -> Self {
-        Self {
-            name: Some(mon.name.clone()),
-            make: mon.make.clone(),
-            model: mon.model.clone(),
-            serial: mon.serial.clone(),
-            config: if mon.disabled {
-                None
-            } else {
-                Some(HeadConfig {
-                    width: mon.width,
-                    height: mon.height,
-                    refresh_rate: mon.refresh_rate,
-                    x: mon.x,
-                    y: mon.y,
-                    scale: mon.scale,
-                    transform: mon.transform,
-                    vrr: mon.vrr,
-                })
-            },
-        }
-    }
-}
-
-impl Head {
-    pub fn cmp_mms(&self, other: &Self) -> std::cmp::Ordering {
-        self.make
-            .cmp(&other.make)
-            .then_with(|| self.model.cmp(&other.model))
-            .then_with(|| self.serial.cmp(&other.serial))
-    }
-}
-
-impl Command for Head {
-    fn get_command(&self) -> String {
-        if let Some(ref cfg) = self.config {
-            format!(
-                "keyword monitor {},{}x{}@{},{}x{},{},transform,{},vrr,{}",
-                self.name.as_deref().unwrap_or(""),
-                cfg.width,
-                cfg.height,
-                cfg.refresh_rate,
-                cfg.x,
-                cfg.y,
-                cfg.scale,
-                cfg.transform,
-                if cfg.vrr { 1 } else { 0 }
-            )
-        } else {
-            format!(
-                "keyword monitor {},disable",
-                self.name.as_deref().unwrap_or(""),
-            )
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct HyprlandCommand(pub String);
-
-impl Command for HyprlandCommand {
-    fn get_command(&self) -> String {
-        self.0.clone()
-    }
-}
-
 fn main() -> anyhow::Result<()> {
     env_logger::init();
 
     let cli = Cli::parse();
+    let backend: Box<dyn Backend> = match cli.backend.unwrap_or(BackendType::WlrRandr) {
+        BackendType::WlrRandr => Box::new(WlrRandrBackend::new(
+            cli.executable
+                .as_deref()
+                .or(option_env!("STD_EXECUTABLE_WLR_RANDR"))
+                .unwrap_or("wlr-randr")
+                .to_string(),
+        )),
+        BackendType::Hyprctl => Box::new(HyprctlBackend::new(
+            cli.executable
+                .as_deref()
+                .or(option_env!("STD_EXECUTABLE_HYPRCTL"))
+                .unwrap_or("hyprctl")
+                .to_string(),
+        )),
+    };
+
     let config = read_config_file()?;
     debug!("Config: {:?}", &config);
-
-    let conn = HyprlandConnection::new();
-    if log_enabled!(Level::Debug) {
-        let version = conn.get_sync::<Version>()?.version;
-        debug!("Hyprland version: {version}");
-    }
 
     // Find out which heads should be ignored because of a closed lid
     let ignored_head_names: std::collections::HashSet<String> = config
@@ -177,12 +100,11 @@ fn main() -> anyhow::Result<()> {
         })
         .collect();
 
-    // Get all monitors from Hyprland, convert to Head structure and sort
-    let monitors = conn.get_with_argument_sync::<Monitors>("all".to_string())?;
+    // Get all heads from backend and sort
     let mut ignored_heads = Vec::new();
-    let mut heads: Vec<Head> = monitors
-        .iter()
-        .map(Head::from)
+    let mut heads: Vec<Head> = backend
+        .get_all_heads()?
+        .into_iter()
         .filter_map(|h| {
             if h.name
                 .as_ref()
@@ -209,28 +131,24 @@ fn main() -> anyhow::Result<()> {
             });
             std::fs::write(path, serde_json::to_string_pretty(&heads)?)?;
         }
-        Commands::Restore(ref opt) => {
-            if let Err(err) = restore_config(&heads, &ignored_heads, &conn) {
-                error!("{}", err);
-
+        Commands::Restore(ref opt) => match load_head_config(&heads, &ignored_heads) {
+            Ok(saved_heads) => backend.set_head_config(&saved_heads)?,
+            Err(err) => {
                 if opt.fallback_to_default {
-                    let commands: Vec<Box<dyn Command>> = heads
-                        .iter()
-                        .filter_map(|h| {
-                            h.name.as_ref().map(|name| -> Box<dyn Command> {
-                                Box::new(HyprlandCommand(format!(
-                                    "keyword monitor {},preferred,auto,auto",
-                                    name
-                                )))
-                            })
-                        })
-                        .collect();
+                    error!("{}", err);
 
-                    conn.send_recipe_sync(&commands)
-                        .map_err(|mut verr| verr.pop().unwrap())?;
+                    let active_head_names: Vec<String> =
+                        heads.iter().filter_map(|h| h.name.clone()).collect();
+                    let inactive_head_names: Vec<String> = ignored_heads
+                        .iter()
+                        .filter_map(|h| h.name.clone())
+                        .collect();
+                    backend.fallback_head_config(&active_head_names, &inactive_head_names)?
+                } else {
+                    Err(err)?;
                 }
             }
-        }
+        },
         Commands::Info => {
             let base_directories = xdg::BaseDirectories::with_prefix("hyprsca")?;
             println!("{} connected heads:", heads.len() + ignored_heads.len());
@@ -269,22 +187,17 @@ fn hash_heads(heads: &[Head]) -> [u8; 32] {
     hasher.update(heads.len().to_le_bytes());
 
     for head in heads {
-        hasher.update(head.make.len().to_le_bytes());
-        hasher.update(head.make.as_bytes());
-        hasher.update(head.model.len().to_le_bytes());
-        hasher.update(head.model.as_bytes());
-        hasher.update(head.serial.len().to_le_bytes());
-        hasher.update(head.serial.as_bytes());
+        for s in [&head.make, &head.model, &head.serial] {
+            let bytes = s.as_bytes();
+            hasher.update(bytes.len().to_le_bytes());
+            hasher.update(bytes);
+        }
     }
 
     hasher.finalize().into()
 }
 
-fn restore_config(
-    heads: &[Head],
-    ignored_heads: &[Head],
-    conn: &HyprlandConnection,
-) -> anyhow::Result<()> {
+fn load_head_config(heads: &[Head], ignored_heads: &[Head]) -> anyhow::Result<Vec<Head>> {
     let base_directories = xdg::BaseDirectories::with_prefix("hyprsca")?;
     let path = base_directories.get_state_file(format!("{}.json", hex::encode(hash_heads(heads))));
     debug!("Attempting to load screen config from {}", path.display());
@@ -312,27 +225,14 @@ fn restore_config(
         saved_head.name = head.name.clone();
     }
 
+    saved_heads.extend(ignored_heads.iter().map(|h| {
+        let mut h = h.clone();
+        h.config = None;
+        h
+    }));
     debug!("Restoring config: {:?}", saved_heads);
-    let commands: Vec<Box<dyn Command>> = saved_heads
-        .into_iter()
-        .chain(ignored_heads.iter().map(|h| {
-            let mut h = h.clone();
-            h.config = None;
-            h
-        }))
-        .map(|m| -> Box<dyn Command> { Box::new(m) })
-        .collect();
 
-    if log_enabled!(Level::Debug) {
-        for cmd in commands.iter() {
-            debug!("hyprctl {}", cmd.get_command());
-        }
-    }
-
-    conn.send_recipe_sync(&commands)
-        .map_err(|mut verr| verr.pop().unwrap())?;
-
-    Ok(())
+    Ok(saved_heads)
 }
 
 fn read_config_file() -> anyhow::Result<ConfigFile> {
