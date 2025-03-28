@@ -1,4 +1,4 @@
-# hyprsca
+# wlscsr
 A screen configuration assistant for Hyprland
 
 ## Features
@@ -10,7 +10,7 @@ A screen configuration assistant for Hyprland
 ## Objective
 There are already a number of programs available that can automatically restore
 screen configuration when screens or connected or disconnected. Unlike those,
-hyprsca does not wait for screens to be connected or disconnected. Instead, the
+wlscsr does not wait for screens to be connected or disconnected. Instead, the
 user must manually invoke it to restore a saved screen configuration. This can
 be done easily by adding a key binding to Hyprland. Why? Because the user
 should be able to do manual changes to the screen config when they so choose,
@@ -18,18 +18,18 @@ using either command line tools (like hyprctl), or graphical tools (like
 wdisplays). The user stays in control. With a single keystroke they can restore
 the saved configuration - but only if and when they wish.
 
-The current screen configuration can be saved with `hyprsca save`. The saved
+The current screen configuration can be saved with `wlscsr save`. The saved
 configuration for the current set of connected outputs (by checking make,
-model, serial number) can be restored with `hyprsca restore`. The latter can be
+model, serial number) can be restored with `wlscsr restore`. The latter can be
 bound to e.g. SUPER+O:
 ```
-bindl = SUPER, O, exec, hyprsca restore
+bindl = SUPER, O, exec, wlscsr restore
 ```
 `bindl` is used, so that this shortcut works even on the lock screen.
 
 ## Configuration
-hyprsca can be configured using a TOML file called `hyprsca.toml` in an XDG
-config file location (e.g. `~/.config/hyprsca.toml`).
+wlscsr can be configured using a TOML file called `wlscsr.toml` in an XDG
+config file location (e.g. `~/.config/wlscsr.toml`).
 
 ### Lid
 To configure which head should be ignored when the laptop lid is closed, add a

@@ -4,14 +4,14 @@ use clap::{Parser, Subcommand};
 use log::{debug, error};
 use serde::Deserialize;
 
-use hyprsca::{
+use wlscsr::{
     backend::{Backend, HyprctlBackend, WlrRandrBackend},
     types::Head,
 };
 
 #[derive(Parser, Debug)]
 #[clap(
-    name = "hyprsca",
+    name = "wlscsr",
     version,
     about = "Save and restore monitor configurations in Hyprland"
 )]
@@ -122,7 +122,7 @@ fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Save => {
-            let base_directories = xdg::BaseDirectories::with_prefix("hyprsca")?;
+            let base_directories = xdg::BaseDirectories::with_prefix("wlscsr")?;
             let path = base_directories
                 .place_state_file(format!("{}.json", hex::encode(hash_heads(&heads))))?;
             debug!("Saving screen config to {}", path.display());
@@ -150,7 +150,7 @@ fn main() -> anyhow::Result<()> {
             }
         },
         Commands::Info => {
-            let base_directories = xdg::BaseDirectories::with_prefix("hyprsca")?;
+            let base_directories = xdg::BaseDirectories::with_prefix("wlscsr")?;
             println!("{} connected heads:", heads.len() + ignored_heads.len());
             for head in heads.iter() {
                 println!(
@@ -198,7 +198,7 @@ fn hash_heads(heads: &[Head]) -> [u8; 32] {
 }
 
 fn load_head_config(heads: &[Head], ignored_heads: &[Head]) -> anyhow::Result<Vec<Head>> {
-    let base_directories = xdg::BaseDirectories::with_prefix("hyprsca")?;
+    let base_directories = xdg::BaseDirectories::with_prefix("wlscsr")?;
     let path = base_directories.get_state_file(format!("{}.json", hex::encode(hash_heads(heads))));
     debug!("Attempting to load screen config from {}", path.display());
     let mut saved_heads = serde_json::from_slice::<Vec<Head>>(&std::fs::read(&path)?)?;
@@ -237,7 +237,7 @@ fn load_head_config(heads: &[Head], ignored_heads: &[Head]) -> anyhow::Result<Ve
 
 fn read_config_file() -> anyhow::Result<ConfigFile> {
     let base_directories = xdg::BaseDirectories::new()?;
-    let path = base_directories.get_config_file("hyprsca.toml");
+    let path = base_directories.get_config_file("wlscsr.toml");
 
     let contents = std::fs::read(path);
 
